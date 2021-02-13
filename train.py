@@ -20,29 +20,41 @@ from functools import partial
 import optax
 from jax.tree_util import tree_map
 from jax.lax import psum
+import argparse
 
+parser = argparse.ArgumentParser(
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+# parser.add_argument('--group', type=str,
+#                     help='w&b init group', default=None)
+parser.add_argument('--seed', type=int, default=0)
+parser.add_argument('--max-conv-size', type=int, default=256)
+parser.add_argument('--dense-kernel-size', type=int, default=32)
+parser.add_argument('--learning-rate', type=float, default=1e-3)
+parser.add_argument('--weight-decay', type=float, default=1e-3)
+parser.add_argument('--num-outer-steps', type=int, default=100,
+                    help='number of times to run inner step')
+parser.add_argument('--num-inner-steps', type=int, default=20,
+                    help='number of steps to do between each validation check')
+parser.add_argument('--force-small-data', action='store_true',
+                    help='if set only use 10 instances for training and'
+                         ' validation')
+opts = parser.parse_args()
+logging.info("opts %s", opts)
 
-class Options(object):
-    max_conv_size = 8  # 256
-    dense_kernel_size = 8  # 96
-    seed = 123
-    learning_rate = 0.001
-    weight_decay = 0.001
-    force_small_data = True
+# load host's worth of training and validation data
 
-
-opts = Options()
-
-train_imgs, train_labels = d.shard_dataset(training=True,
-                                           force_small_data=opts.force_small_data)
-validate_imgs, validate_labels = d.shard_dataset(training=False,
-                                                 force_small_data=opts.force_small_data)
+train_imgs, train_labels = d.shard_dataset(
+    training=True, force_small_data=opts.force_small_data)
+validate_imgs, validate_labels = d.shard_dataset(
+    training=False, force_small_data=opts.force_small_data)
 
 logging.info("loaded %s %s %s %s",
              u.shapes_of(train_imgs), u.shapes_of(train_labels),
              u.shapes_of(validate_imgs), u.shapes_of(validate_labels))
 
-augmented_train_imgs = d.v_all_combos_augment(train_imgs)  # # (8, 8B, H, W, C)
+# augment training data with x8 values
+
+augmented_train_imgs = d.v_all_combos_augment(train_imgs)  # (8, 8B, H, W, C)
 augmented_train_labels = pmap(lambda v: jnp.repeat(v, 8))(train_labels)
 
 logging.info("augmented %s %s",
@@ -51,7 +63,6 @@ logging.info("augmented %s %s",
 
 
 # construct model
-
 
 def build_model(opts):
     m = partial(model.haiku_model,
@@ -128,12 +139,14 @@ def accuracy(params, x, y_true):
 # run simple training loop
 
 
-for outer_idx in range(20):
-    for inner_idx in range(30):
+for outer_idx in range(opts.num_outer_steps):
+
+    for inner_idx in range(opts.num_inner_steps):
         params, opt_state, loss = p_update(params, opt_state,
                                            augmented_train_imgs,
                                            augmented_train_labels)
         logging.info("%s %s", outer_idx, inner_idx)
+
     train_accuracy = accuracy(params, train_imgs, train_labels)
     validation_accuracy = accuracy(params, validate_imgs, validate_labels)
     logging.info(f"last train mean loss {float(loss.mean()):0.3f}"
