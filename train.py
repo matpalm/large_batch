@@ -30,9 +30,14 @@ parser.add_argument('--group', type=str,
                     help='w&b init group', default=None)
 parser.add_argument('--seed', type=int, default=0)
 parser.add_argument('--max-conv-size', type=int, default=256)
-parser.add_argument('--dense-kernel-size', type=int, default=32)
+parser.add_argument('--dense-kernel-size', type=int, default=128)
+parser.add_argument('--optimiser', type=str, default='lamb',
+                    help='optimiser to use. {adam,lamb,sgd}')
 parser.add_argument('--learning-rate', type=float, default=1e-3)
-parser.add_argument('--weight-decay', type=float, default=1e-3)
+parser.add_argument('--weight-decay', type=float, default=0.0,
+                    help='weight decay. only applicable to lamb.')
+parser.add_argument('--momentum', type=float, default=0.0,
+                    help='momentum. only applicable to sgd.')
 parser.add_argument('--num-outer-steps', type=int, default=50,
                     help='number of times to run inner step')
 parser.add_argument('--num-inner-steps', type=int, default=20,
@@ -40,14 +45,20 @@ parser.add_argument('--num-inner-steps', type=int, default=20,
 parser.add_argument('--force-small-data', action='store_true',
                     help='if set only use 10 instances for training and'
                          ' validation')
+
 opts = parser.parse_args()
 logging.info("opts %s", opts)
+
+if opts.optimiser not in ['adam', 'lamb', 'sgd']:
+    raise Exception("invalid --optimiser")
 
 run = u.DTS()
 logging.info("starting run %s", run)
 
-wandb_enabled = opts.group is not None
-if wandb_enabled and u.primary_host():
+# only run wandb stuff if it's configured, and only on primary host
+wandb_enabled = (opts.group is not None) and u.primary_host()
+
+if wandb_enabled:
     wandb.init(project='large_batch', group=opts.group, name=run,
                reinit=True)
     # save group again explicitly to work around sync bug that drops
@@ -56,8 +67,10 @@ if wandb_enabled and u.primary_host():
     wandb.config.seed = opts.seed
     wandb.config.max_conv_size = opts.max_conv_size
     wandb.config.dense_kernel_size = opts.dense_kernel_size
+    wandb.config.optimiser = opts.optimiser
     wandb.config.learning_rate = opts.learning_rate
     wandb.config.weight_decay = opts.weight_decay
+    wandb.config.momentum = opts.momentum
     wandb.config.num_outer_steps = opts.num_outer_steps
     wandb.config.num_inner_steps = opts.num_inner_steps
 else:
@@ -76,8 +89,8 @@ logging.info("loaded %s %s %s %s",
 
 # augment training data with x8 values
 
-augmented_train_imgs = d.batched_all_combos_augment(
-    train_imgs)  # (8, 8B, H, W, C)
+# (8, B, H, W, C) -> (8, 8B, H, W, C)
+augmented_train_imgs = d.batched_all_combos_augment(train_imgs)
 augmented_train_labels = pmap(lambda v: jnp.repeat(v, 8))(train_labels)
 
 logging.info("augmented %s %s",
@@ -104,9 +117,14 @@ pod_rng, init_key = jax.random.split(pod_rng)
 params = model.init(init_key, representative_input)
 
 # construct optimiser
-
-opt = optax.lamb(learning_rate=opts.learning_rate,
-                 weight_decay=opts.weight_decay)
+if opts.optimiser == 'adam':
+    opt = optax.adam(learning_rate=opts.learning_rate)
+elif opts.optimiser == 'lamb':
+    opt = optax.lamb(learning_rate=opts.learning_rate,
+                     weight_decay=opts.weight_decay)
+else:  # sgd
+    opt = optax.sgd(learning_rate=opts.learning_rate,
+                    momentum=opts.momentum)
 
 opt_state = opt.init(params)
 
@@ -128,6 +146,7 @@ def mean_cross_entropy(params, x, y_true):
     return jnp.mean(softmax_cross_entropy(logits, y_true))
 
 
+@partial(pmap, in_axes=(0, 0, 0, 0), axis_name='device')
 def update(params, opt_state, x, y_true):
     # calc grads; summed across devices
     loss, grads = value_and_grad(mean_cross_entropy)(params, x, y_true)
@@ -139,19 +158,14 @@ def update(params, opt_state, x, y_true):
     return params, opt_state, loss.mean()
 
 
-p_update = pmap(update, in_axes=(0, 0, 0, 0), axis_name='device')
-
-
+@partial(pmap, in_axes=(0, 0))
 def predictions(params, x):
     logits = model.apply(params, x)
     return jnp.argmax(logits, axis=-1)
 
 
-p_predictions = pmap(predictions, in_axes=(0, 0))
-
-
 def accuracy(params, x, y_true):
-    y_pred = p_predictions(params, x)
+    y_pred = predictions(params, x)
     num_correct = jnp.sum(jnp.equal(y_pred, y_true))
     num_total = x.shape[0] * x.shape[1]  # recall; x is sharded!
     return float(num_correct / num_total)
@@ -159,29 +173,41 @@ def accuracy(params, x, y_true):
 # run simple training loop
 
 
+best_validation_accuracy = 0.0
+best_validation_idx = None
+
 for outer_idx in range(opts.num_outer_steps):
 
     inner_step_start = time.time()
     for inner_idx in range(opts.num_inner_steps):
-        params, opt_state, loss = p_update(params, opt_state,
-                                           augmented_train_imgs,
-                                           augmented_train_labels)
+        params, opt_state, loss = update(params, opt_state,
+                                         augmented_train_imgs,
+                                         augmented_train_labels)
     step_duration = time.time() - inner_step_start
 
     train_accuracy = accuracy(params, train_imgs, train_labels)
     validation_accuracy = accuracy(params, validate_imgs, validate_labels)
     last_mean_loss = float(loss.mean())
+
+    if validation_accuracy > best_validation_accuracy:
+        best_validation_accuracy = validation_accuracy
+        best_validation_idx = outer_idx
+
     logging.info(f"{outer_idx}: inner_step_duration {step_duration:0.5f}"
                  f" last train mean loss {last_mean_loss:0.3f}"
                  f" train accuracy {train_accuracy:0.2f}"
                  f" validation accuracy {validation_accuracy:0.2f}")
 
-    if wandb_enabled and u.primary_host():
+    if wandb_enabled:
         wandb.log({'last_mean_loss': last_mean_loss}, step=outer_idx)
         wandb.log({'train_accuracy': train_accuracy}, step=outer_idx)
         wandb.log({'validation_accuracy': validation_accuracy}, step=outer_idx)
 
-if wandb_enabled and u.primary_host():
-    wandb.log({'final_validation_accuracy': validation_accuracy},
+if wandb_enabled:
+    wandb.log({'best_validation_accuracy': best_validation_accuracy,
+               'best_validation_idx': best_validation_idx},
               step=opts.num_outer_steps)
     wandb.join()
+
+logging.info("run %s best_validation_accuracy %f best_validation_idx %d",
+             run, best_validation_accuracy, best_validation_idx)
