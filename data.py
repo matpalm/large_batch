@@ -4,16 +4,28 @@ import jax
 from jax import jit, vmap, pmap
 import jax.numpy as jnp
 import util as u
+import logging
 
 
-def shard_dataset(training):
+def shard_dataset(training, force_small_data=False):
     # choose split that divides evenly across 4 hosts
+    # when force_small_data is set (e.g. local dev smoke test)
+    # just use 10 examples for everything
     h = jax.host_id()
     if training:  # train[:80%]
-        split = f"train[{h*5400}:{(h+1)*5400}]"
+        if force_small_data:
+            per_host_egs = 10
+        else:
+            per_host_egs = 5400
+        split = f"train[{h*per_host_egs}:{(h+1)*per_host_egs}]"
     else:  # validation; # train[80%:90%]
-        split = f"train[{21600+(h*675)}:{21600+((h+1)*675)}]"
-    print("for host", jax.host_id(), "split is", split)
+        if force_small_data:
+            per_host_egs = 10
+        else:
+            per_host_egs = 675
+        split = f"train[{21600+(h*per_host_egs)}:{21600+((h+1)*per_host_egs)}]"
+    logging.info("for host %s (training=%s) split is %s",
+                 jax.host_id(), training, split)
 
     # load images and labels as single batch
     dataset = tfds.load('eurosat/rgb', split=split, as_supervised=True)
