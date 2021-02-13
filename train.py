@@ -17,6 +17,7 @@ import jax.numpy as jnp
 import model
 import haiku as hk
 from functools import partial
+import optax
 
 train_imgs, train_labels = d.shard_dataset(training=True)
 validate_imgs, validate_labels = d.shard_dataset(training=False)
@@ -43,6 +44,8 @@ class Options(object):
 
 opts = Options()
 
+# construct model
+
 
 def build_model(opts):
     m = partial(model.haiku_model,
@@ -61,3 +64,20 @@ pod_rng, init_key = jax.random.split(pod_rng)
 params = model.init(init_key, representative_input)
 
 logging.info("params %s", u.shapes_of(params))
+
+# construct optimiser
+
+opt = optax.lamb(learning_rate=opts.learning_rate,
+                 weight_decay=opts.weight_decay)
+
+opt_state = opt.init(params)
+
+logging.info("opt_state %s", u.shapes_of(opt_state))
+
+# replicate both across devices
+
+params = u.replicate(params)
+opt_state = u.replicate(opt_state)
+
+logging.info("replicated params %s", u.shapes_of(params))
+logging.info("replicated opt_state %s", u.shapes_of(opt_state))
