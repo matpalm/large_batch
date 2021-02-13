@@ -77,4 +77,10 @@ def all_combos_augment(img):  # (H,W,C) -> (8,H,W,C)
     flips = np.array([0, 0, 0, 0, 1, 1, 1, 1])
     return v_augment(img, rots, flips)
 
+
+@pmap
+def v_all_combos_augment(imgs):
+    imgs = vmap(all_combos_augment)(imgs)  # (B,H,W,C) -> (B,8,H,W,C)
+    return imgs.reshape(-1, 64, 64, 3)     # (8B, H, W, C)
+
 # all_combo_augment = jit(vmap(all_combo_augment))  # (B,H,W,C) -> (B,8,H,W,C)
