@@ -21,17 +21,19 @@ import optax
 from jax.tree_util import tree_map
 from jax.lax import psum
 import argparse
+import wandb
+import time
 
 parser = argparse.ArgumentParser(
     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-# parser.add_argument('--group', type=str,
-#                     help='w&b init group', default=None)
+parser.add_argument('--group', type=str,
+                    help='w&b init group', default=None)
 parser.add_argument('--seed', type=int, default=0)
 parser.add_argument('--max-conv-size', type=int, default=256)
 parser.add_argument('--dense-kernel-size', type=int, default=32)
 parser.add_argument('--learning-rate', type=float, default=1e-3)
 parser.add_argument('--weight-decay', type=float, default=1e-3)
-parser.add_argument('--num-outer-steps', type=int, default=100,
+parser.add_argument('--num-outer-steps', type=int, default=50,
                     help='number of times to run inner step')
 parser.add_argument('--num-inner-steps', type=int, default=20,
                     help='number of steps to do between each validation check')
@@ -40,6 +42,26 @@ parser.add_argument('--force-small-data', action='store_true',
                          ' validation')
 opts = parser.parse_args()
 logging.info("opts %s", opts)
+
+run = u.DTS()
+logging.info("starting run %s", run)
+
+wandb_enabled = opts.group is not None
+if wandb_enabled and u.primary_host():
+    wandb.init(project='large_batch', group=opts.group, name=run,
+               reinit=True)
+    # save group again explicitly to work around sync bug that drops
+    # group when 'wandb off'
+    wandb.config.group = opts.group
+    wandb.config.seed = opts.seed
+    wandb.config.max_conv_size = opts.max_conv_size
+    wandb.config.dense_kernel_size = opts.dense_kernel_size
+    wandb.config.learning_rate = opts.learning_rate
+    wandb.config.weight_decay = opts.weight_decay
+    wandb.config.num_outer_steps = opts.num_outer_steps
+    wandb.config.num_inner_steps = opts.num_inner_steps
+else:
+    logging.info("not using wandb and/or not primary host")
 
 # load host's worth of training and validation data
 
@@ -54,7 +76,8 @@ logging.info("loaded %s %s %s %s",
 
 # augment training data with x8 values
 
-augmented_train_imgs = d.v_all_combos_augment(train_imgs)  # (8, 8B, H, W, C)
+augmented_train_imgs = d.batched_all_combos_augment(
+    train_imgs)  # (8, 8B, H, W, C)
 augmented_train_labels = pmap(lambda v: jnp.repeat(v, 8))(train_labels)
 
 logging.info("augmented %s %s",
@@ -73,7 +96,7 @@ def build_model(opts):
 
 model = build_model(opts)
 
-host_rng = jax.random.PRNGKey(opts.seed ^ jax.host_id())  # unused?
+# host_rng = jax.random.PRNGKey(opts.seed ^ jax.host_id())  # unused
 pod_rng = jax.random.PRNGKey(opts.seed - 1)
 
 representative_input = jnp.zeros((1, 64, 64, 3))
@@ -91,9 +114,6 @@ opt_state = opt.init(params)
 
 params = u.replicate(params)
 opt_state = u.replicate(opt_state)
-
-logging.info("replicated params %s", u.shapes_of(params))
-logging.info("replicated opt_state %s", u.shapes_of(opt_state))
 
 # define training loops and some validation functions
 
@@ -141,14 +161,27 @@ def accuracy(params, x, y_true):
 
 for outer_idx in range(opts.num_outer_steps):
 
+    inner_step_start = time.time()
     for inner_idx in range(opts.num_inner_steps):
         params, opt_state, loss = p_update(params, opt_state,
                                            augmented_train_imgs,
                                            augmented_train_labels)
-        logging.info("%s %s", outer_idx, inner_idx)
+    step_duration = time.time() - inner_step_start
 
     train_accuracy = accuracy(params, train_imgs, train_labels)
     validation_accuracy = accuracy(params, validate_imgs, validate_labels)
-    logging.info(f"last train mean loss {float(loss.mean()):0.3f}"
+    last_mean_loss = float(loss.mean())
+    logging.info(f"{outer_idx}: inner_step_duration {step_duration:0.5f}"
+                 f" last train mean loss {last_mean_loss:0.3f}"
                  f" train accuracy {train_accuracy:0.2f}"
                  f" validation accuracy {validation_accuracy:0.2f}")
+
+    if wandb_enabled and u.primary_host():
+        wandb.log({'last_mean_loss': last_mean_loss}, step=outer_idx)
+        wandb.log({'train_accuracy': train_accuracy}, step=outer_idx)
+        wandb.log({'validation_accuracy': validation_accuracy}, step=outer_idx)
+
+if wandb_enabled and u.primary_host():
+    wandb.log({'final_validation_accuracy': validation_accuracy},
+              step=opts.num_outer_steps)
+    wandb.join()

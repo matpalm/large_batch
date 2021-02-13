@@ -75,24 +75,21 @@ def random_flip(m, k):
     return jnp.where(k == 0, m, jnp.fliplr(m))
 
 
-def augment(img, rot, flip):
+def augment(img, rot, flip):  # (H,W,C) -> (H,W,C)
     img = rot90(img, rot)
     img = random_flip(img, flip)
     return img
 
 
-v_augment = vmap(augment, in_axes=(None, 0, 0))
-
-
 def all_combos_augment(img):  # (H,W,C) -> (8,H,W,C)
     rots = np.array([0, 1, 2, 3, 0, 1, 2, 3])
     flips = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+    v_augment = vmap(augment, in_axes=(None, 0, 0))
     return v_augment(img, rots, flips)
 
 
 @pmap
-def v_all_combos_augment(imgs):
-    imgs = vmap(all_combos_augment)(imgs)  # (B,H,W,C) -> (B,8,H,W,C)
-    return imgs.reshape(-1, 64, 64, 3)     # (8B, H, W, C)
-
-# all_combo_augment = jit(vmap(all_combo_augment))  # (B,H,W,C) -> (B,8,H,W,C)
+def batched_all_combos_augment(imgs):
+    v_all_combos_augment = vmap(all_combos_augment)
+    imgs = v_all_combos_augment(imgs)   # (B,H,W,C) -> (B,8,H,W,C)
+    return imgs.reshape(-1, 64, 64, 3)  # (8B,H,W,C)

@@ -1,6 +1,7 @@
 import jax.numpy as jnp
-from jax import pmap
+from jax import pmap, host_id
 from jax.tree_util import tree_map
+import datetime
 
 
 def shard(x):
@@ -17,3 +18,11 @@ def replicate(x, replicas=8):
 def shapes_of(pytree):
     # rebuild a pytree swapping actual params for just shape and type
     return tree_map(lambda v: (v.shape, type(v), v.dtype), pytree)
+
+
+def DTS():
+    return datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+
+
+def primary_host():
+    return host_id() == 0
