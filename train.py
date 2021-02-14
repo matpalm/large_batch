@@ -98,7 +98,7 @@ logging.debug("augmented %s %s",
               u.shapes_of(augmented_train_labels))
 
 
-# construct model
+# construct and init model
 
 def build_model(opts):
     m = partial(model.haiku_model,
@@ -116,7 +116,8 @@ representative_input = jnp.zeros((1, 64, 64, 3))
 pod_rng, init_key = jax.random.split(pod_rng)
 params = model.init(init_key, representative_input)
 
-# construct optimiser
+# construct and init optimiser
+
 if opts.optimiser == 'adam':
     opt = optax.adam(learning_rate=opts.learning_rate)
 elif opts.optimiser == 'lamb':
@@ -128,7 +129,7 @@ else:  # sgd
 
 opt_state = opt.init(params)
 
-# replicate both across devices
+# replicate both model params and optimiser state across devices
 
 params = u.replicate(params)
 opt_state = u.replicate(opt_state)
