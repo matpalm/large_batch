@@ -83,9 +83,9 @@ train_imgs, train_labels = d.shard_dataset(
 validate_imgs, validate_labels = d.shard_dataset(
     training=False, force_small_data=opts.force_small_data)
 
-logging.info("loaded %s %s %s %s",
-             u.shapes_of(train_imgs), u.shapes_of(train_labels),
-             u.shapes_of(validate_imgs), u.shapes_of(validate_labels))
+logging.debug("loaded %s %s %s %s",
+              u.shapes_of(train_imgs), u.shapes_of(train_labels),
+              u.shapes_of(validate_imgs), u.shapes_of(validate_labels))
 
 # augment training data with x8 values
 
@@ -93,9 +93,9 @@ logging.info("loaded %s %s %s %s",
 augmented_train_imgs = d.batched_all_combos_augment(train_imgs)
 augmented_train_labels = pmap(lambda v: jnp.repeat(v, 8))(train_labels)
 
-logging.info("augmented %s %s",
-             u.shapes_of(augmented_train_imgs),
-             u.shapes_of(augmented_train_labels))
+logging.debug("augmented %s %s",
+              u.shapes_of(augmented_train_imgs),
+              u.shapes_of(augmented_train_labels))
 
 
 # construct model
@@ -193,7 +193,7 @@ for outer_idx in range(opts.num_outer_steps):
         best_validation_accuracy = validation_accuracy
         best_validation_idx = outer_idx
 
-    logging.info(f"{outer_idx}: inner_step_duration {step_duration:0.5f}"
+    logging.info(f"{outer_idx}: inner_step_duration {step_duration:0.3f}"
                  f" last train mean loss {last_mean_loss:0.3f}"
                  f" train accuracy {train_accuracy:0.2f}"
                  f" validation accuracy {validation_accuracy:0.2f}")
