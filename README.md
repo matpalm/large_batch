@@ -1,0 +1,1 @@
+hacking eurosat/RGB with global batch size of 172,000
